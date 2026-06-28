@@ -194,6 +194,15 @@ a{color:inherit}
 .bteam .bs{font-family:'Anton';font-size:18px}
 .bteam.win{background:#f3fff8}.bteam.win .bn{color:#0c8a51}
 .bmeta{text-align:center;font-size:11px;font-weight:700;color:var(--muted);padding:5px}
+.infonote{background:#fff;border:2.5px solid var(--ink);border-radius:14px;padding:0 16px;margin-bottom:16px;box-shadow:var(--shadow)}
+.infonote summary{cursor:pointer;font-family:'Anton';font-size:15px;letter-spacing:.3px;padding:12px 0;list-style:none}
+.infonote summary::-webkit-details-marker{display:none}
+.infonote summary::after{content:'▾';float:right;color:var(--purple)}
+.infonote[open] summary::after{content:'▴'}
+.infonote-body{padding:0 0 12px}
+.infonote-body p{font-size:13px;line-height:1.6;margin:7px 0;color:var(--ink)}
+.infonote-body p b{color:var(--ink)}
+.infonote-body .pts{display:inline-block;font-weight:800;background:var(--lime);border:2px solid var(--ink);border-radius:6px;padding:0 6px}
 @media(max-width:480px){
   .flag{width:60px;height:40px}.trophybtn{width:42px;height:42px}
   .stepper{width:44px}.stepper .st-val{font-size:24px}
@@ -246,6 +255,14 @@ a{color:inherit}
   <div class="wrap">
     <div class="page active" id="page-matches">
       <div class="sectionhead"><h2>Matches</h2><span class="tag" id="matchCount"></span></div>
+      <details class="infonote" open>
+        <summary>ℹ️ How predictions &amp; points work</summary>
+        <div class="infonote-body">
+          <p>For each match, tap the trophy above the team you back and set the score, then hit <b>Submit Prediction</b>. You can change your pick as many times as you like up until kickoff — the moment a match starts it locks 🔒. Finished matches drop off this page automatically (their results live on the Bracket, Predictions Board and Leaderboard); new fixtures appear here the moment the next round's teams are set.</p>
+          <p><b>Points per match:</b> correct winner <span class="pts">+10</span> · exact score <span class="pts">+5</span> · one team's goals right <span class="pts">+1</span>. (The +5 and +1 are never combined — you get whichever applies.)</p>
+          <p><b>Knockout rounds (Round of 32 onward):</b> the “winner” means the team that <b>advances</b> — extra time and penalties count, so a penalty-shootout winner still earns you the <span class="pts">+10</span>. The <b>score</b> is judged on the <b>90-minute</b> result only, and there is <b>no Draw button</b> (someone always goes through). So if a game ends 1–1 after 90 minutes and is decided on penalties, a "1–1" score prediction still scores, and your advancing-team pick is what earns the +10.</p>
+        </div>
+      </details>
       <div class="banner" id="adminUnlockBanner">
         Admin? Enter final scores here:
         <input class="input" id="adminPass" placeholder="admin password" style="height:36px;padding:8px 12px;max-width:200px;display:inline-block;margin:6px 6px 0 0;font-size:13px">
@@ -360,7 +377,7 @@ const FINAL_FIELDS = [
   { key:"player",   icon:"⭐", label:"Player of the Tournament", type:"player" }
 ];
 
-const state = { user:null, users:[], preds:[], results:{}, espnResults:{}, sheetResults:{}, finals:{}, bracket:null, admin:false, loaded:false };
+const state = { user:null, users:[], preds:[], results:{}, espnResults:{}, sheetResults:{}, finals:{}, finalsPicks:{}, bracket:null, koFixtures:[], admin:false, loaded:false };
 
 function lsGet(k){ try{return localStorage.getItem(k)}catch(e){return null} }
 function lsSet(k,v){ try{localStorage.setItem(k,v)}catch(e){} }
@@ -376,6 +393,8 @@ function ingest(data){
   state.sheetResults={};
   (data.results||[]).forEach(x=>{ state.sheetResults[x.matchId]={h:Number(x.h),a:Number(x.a)}; });
   state.finals = data.finals||{};
+  state.finalsPicks={};
+  (data.finalsPicks||[]).forEach(p=>{ state.finalsPicks[p.name]=p; });
   mergeResults();
   state.loaded=true;
 }
@@ -417,26 +436,43 @@ function roundOf(ds){ const n=Number(ds);
   if(n===20260718) return "Third-place Play-off";
   return "Final"; }
 const ROUND_ORDER=["Round of 32","Round of 16","Quarter-finals","Semi-finals","Third-place Play-off","Final"];
-async function fetchBracket(){ const rounds={}; ROUND_ORDER.forEach(r=>rounds[r]=[]);
+function shortRound(r){ return {"Round of 32":"R32","Round of 16":"R16","Quarter-finals":"QF","Semi-finals":"SF","Third-place Play-off":"3RD-PLACE","Final":"FINAL"}[r]||"KO"; }
+async function syncKnockout(){
+  const rounds={}; ROUND_ORDER.forEach(r=>rounds[r]=[]);
+  const fixtures=[], koRes={};
   await Promise.all(KO_DAYS.map(async d=>{ try{ const j=await fetchEspnDay(d);
     (j.events||[]).forEach(ev=>{ const c=ev.competitions&&ev.competitions[0]; if(!c)return;
       let h=null,a=null; (c.competitors||[]).forEach(x=>{ if(x.homeAway==="home")h=x; else if(x.homeAway==="away")a=x;});
       if(!h||!a)return; const st=(c.status&&c.status.type)||{}; const round=roundOf(d);
-      (rounds[round]=rounds[round]||[]).push({ date:ev.date,
+      const hFull=(h.team&&h.team.displayName)||"", aFull=(a.team&&a.team.displayName)||"";
+      rounds[round].push({ date:ev.date,
         hn:(h.team&&(h.team.shortDisplayName||h.team.displayName))||"", hl:(h.team&&h.team.logo)||"", hs:h.score, hw:!!h.winner,
         an:(a.team&&(a.team.shortDisplayName||a.team.displayName))||"", al:(a.team&&a.team.logo)||"", as:a.score, aw:!!a.winner,
         state:st.state||"pre", completed:!!st.completed, detail:st.shortDetail||"" });
+      // a predictable fixture only when BOTH teams resolve to a known country (not "Winners Group A")
+      const hc=codeForName(hFull), ac=codeForName(aFull);
+      if(hc&&ac){
+        const id=Number(ev.id);
+        if(id) { fixtures.push({ id:id, knockout:true, round:round, group:shortRound(round),
+          home:hFull, away:aFull, hc:hc, ac:ac, hl:(h.team&&h.team.logo)||"", al:(a.team&&a.team.logo)||"", ko:ev.date });
+          if(st.completed){ const hs=Number(h.score),as=Number(a.score);
+            if(!isNaN(hs)&&!isNaN(as)) koRes[id]={h:hs,a:as,w:h.winner?"home":(a.winner?"away":undefined)}; } }
+      }
     });
   }catch(e){} }));
   Object.keys(rounds).forEach(r=> rounds[r].sort((x,y)=> new Date(x.date)-new Date(y.date)));
-  return rounds; }
+  state.bracket=rounds; state.koFixtures=fixtures;
+  Object.assign(state.espnResults, koRes); mergeResults();
+}
 
 let _refreshing=false;
 async function refreshAll(){
   if(_refreshing) return; _refreshing=true;
   try{
     try{ const d=await apiGet(); ingest(d); }catch(e){}
-    try{ state.espnResults=await fetchEspnResults(); mergeResults(); }catch(e){}
+    try{ state.espnResults=await fetchEspnResults(); }catch(e){}
+    try{ await syncKnockout(); }catch(e){}
+    mergeResults();
     rerenderCurrent();
   } finally { _refreshing=false; }
 }
@@ -466,12 +502,13 @@ function flagUrl(code){ return "https://flagcdn.com/w80/"+code+".png"; }
 function scoreOf(pred,res){
   if(!res) return null;
   let pts=0;
-  const out=res.h>res.a?"home":res.h<res.a?"away":"draw";
+  const out = res.w ? res.w : (res.h>res.a?"home":res.h<res.a?"away":"draw");
   if(pred.winner===out) pts+=10;
   if(pred.h===res.h && pred.a===res.a) pts+=5;
   else if(pred.h===res.h || pred.a===res.a) pts+=1;
   return pts;
 }
+function getBracket(name){ return state.finalsPicks[name]||null; }
 function myPred(matchId){ return state.preds.find(p=>p.name===state.user && p.matchId===matchId)||null; }
 
 function setupStepper(el, initial, locked){
@@ -495,10 +532,15 @@ const TROPHY='<svg viewBox="0 0 24 32"><g class="cup">'
 
 function renderMatches(){
   const host=document.getElementById("matchList");
-  document.getElementById("matchCount").textContent=FIXTURES.length+" matches";
   host.innerHTML="";
+  const upcoming=allMatches().filter(m=>!isLocked(m.ko)).sort((a,b)=> new Date(a.ko)-new Date(b.ko));
+  document.getElementById("matchCount").textContent=upcoming.length+" open";
+  if(!upcoming.length){
+    host.innerHTML='<div class="banner" style="background:#f0edf9">No matches are open for prediction right now. New fixtures appear here automatically as soon as the next round\'s matchups are set. Past matches, scores and points live on the <b>Predictions Board</b>, <b>Leaderboard</b> and <b>Bracket</b>.</div>';
+    return;
+  }
   let lastDay=null;
-  FIXTURES.forEach(m=>{
+  upcoming.forEach(m=>{
     const tp=trParts(m.ko);
     if(tp.dayKey!==lastDay){ lastDay=tp.dayKey;
       const db=document.createElement("div"); db.className="daybar"; db.textContent=tp.dayLabel; host.appendChild(db); }
@@ -511,21 +553,21 @@ function matchCard(m,tp){
   const pred=myPred(m.id);
   const card=document.createElement("div"); card.className="card";
   card.innerHTML=`
-    <div class="grouptag">GROUP ${m.group}</div>
+    <div class="grouptag">${m.knockout?esc(m.group):('GROUP '+esc(m.group))}</div>
     <div class="when">📅 <b>${tp.day}, ${tp.date}</b> · 🕘 <b>${tp.time}</b> <span style="color:var(--muted)">GMT+3</span>
       ${locked?'<span class="locktag">🔒 locked</span>':''}
       ${state.results[m.id]?`<span class="reslag">FT ${state.results[m.id].h}–${state.results[m.id].a}</span>`:''}
       ${pred && !locked?'<span class="savedtag">✓ your pick saved</span>':''}
     </div>
-    <div class="qlabel">Who wins?</div>
+    <div class="qlabel">${m.knockout?'Who advances?':'Who wins?'}</div>
     <div class="teams">
       <div class="team">
         <button class="trophybtn" data-w="home">${TROPHY}</button>
-        <img class="flag" src="${flagUrl(m.hc)}" alt="${m.home}">
-        <div class="tname">${m.home}</div>
+        <img class="flag" src="${flagUrl(m.hc)}" alt="${esc(m.home)}">
+        <div class="tname">${esc(m.home)}</div>
       </div>
       <div class="mid">
-        <div class="qlabel" style="margin:0 0 2px">Score?</div>
+        <div class="qlabel" style="margin:0 0 2px">${m.knockout?'Score (90 min)?':'Score?'}</div>
         <div class="scoreboxes">
           <div class="stepper" data-s="h">
             <button type="button" class="st-up">&#9650;</button>
@@ -542,11 +584,11 @@ function matchCard(m,tp){
       </div>
       <div class="team">
         <button class="trophybtn" data-w="away">${TROPHY}</button>
-        <img class="flag" src="${flagUrl(m.ac)}" alt="${m.away}">
-        <div class="tname">${m.away}</div>
+        <img class="flag" src="${flagUrl(m.ac)}" alt="${esc(m.away)}">
+        <div class="tname">${esc(m.away)}</div>
       </div>
     </div>
-    <div class="drawrow"><button class="drawbtn" data-w="draw">Draw</button></div>
+    ${m.knockout?'':'<div class="drawrow"><button class="drawbtn" data-w="draw">Draw</button></div>'}
     <button class="btn green full submit">SUBMIT PREDICTION</button>
     <div class="msg"></div>
   `;
@@ -559,20 +601,20 @@ function matchCard(m,tp){
   let winner=pred?pred.winner:null;
   function paint(){
     trophies.forEach(b=>b.classList.toggle("sel",b.dataset.w===winner));
-    drawBtn.classList.toggle("sel",winner==="draw");
+    if(drawBtn) drawBtn.classList.toggle("sel",winner==="draw");
   }
   paint();
   if(locked){
-    trophies.forEach(b=>b.disabled=true); drawBtn.disabled=true; submit.disabled=true;
+    trophies.forEach(b=>b.disabled=true); if(drawBtn) drawBtn.disabled=true; submit.disabled=true;
     submit.textContent=pred?"Prediction locked":"No prediction made";
     submit.style.background="#c9c4d8"; submit.style.borderColor="#c9c4d8";
     return card;
   }
   trophies.forEach(b=>b.onclick=()=>{ winner=b.dataset.w; paint(); });
-  drawBtn.onclick=()=>{ winner="draw"; paint(); };
+  if(drawBtn) drawBtn.onclick=()=>{ winner="draw"; paint(); };
   submit.onclick=async()=>{
     if(isLocked(m.ko)){ msg.className="msg err"; msg.textContent="This match has kicked off — predictions are locked."; renderMatches(); return; }
-    if(!winner){ msg.className="msg err"; msg.textContent="Pick a winner first (a trophy or Draw)."; return; }
+    if(!winner){ msg.className="msg err"; msg.textContent=m.knockout?"Pick the team you think advances first.":"Pick a winner first (a trophy or Draw)."; return; }
     submit.disabled=true; msg.className="msg"; msg.textContent="Saving…";
     try{
       const res=await apiPost({action:"predict",name:state.user,matchId:m.id,winner,h:stepH.get(),a:stepA.get()});
@@ -602,7 +644,8 @@ function renderLeaderboard(){
 
 function renderBoard(){
   const host=document.getElementById("boardList"); host.innerHTML="";
-  FIXTURES.forEach(m=>{
+  const matches=allMatches().slice().sort((a,b)=> new Date(a.ko)-new Date(b.ko));
+  matches.forEach(m=>{
     const ps=state.preds.filter(p=>p.matchId===m.id);
     if(!ps.length) return;
     const res=state.results[m.id];
@@ -610,9 +653,9 @@ function renderBoard(){
     const card=document.createElement("div"); card.className="pbcard";
     card.innerHTML=`
       <div class="pbhead">
-        <div class="fl"><img src="${flagUrl(m.hc)}">${m.home}</div>
+        <div class="fl"><img src="${flagUrl(m.hc)}">${esc(m.home)}</div>
         <span class="vs">–</span>
-        <div class="fl">${m.away}<img src="${flagUrl(m.ac)}"></div>
+        <div class="fl">${esc(m.away)}<img src="${flagUrl(m.ac)}"></div>
         <div class="res">${res?res.h+" - "+res.a:"–"}<small>${res?'final':tp.day+' '+tp.time}</small></div>
       </div>
       <div class="pbbody"></div>`;
@@ -623,7 +666,7 @@ function renderBoard(){
       const s=scoreOf(p,res);
       const badge=s==null?'':`<span class="ptbadge ${s===0?'zero':''}">${s} pts</span>`;
       return `<div class="pbrow"><span class="who">${esc(p.name)}${p.name===state.user?' •':''}</span>
-        <span class="pick">${pick}</span><span class="sc">${p.h}-${p.a}</span>${badge}</div>`;
+        <span class="pick">${esc(pick)}</span><span class="sc">${p.h}-${p.a}</span>${badge}</div>`;
     }).join('');
     host.appendChild(card);
   });
@@ -643,11 +686,8 @@ function teamList(){
   return out;
 }
 function teamCode(name){ const t=teamList().find(x=>x.name===name); return t?t.code:null; }
-function getBracket(name){
-  const p=state.preds.find(x=>x.name===name && x.matchId===BRACKET_ID);
-  if(!p||!p.winner) return null;
-  try{ return JSON.parse(p.winner); }catch(e){ return null; }
-}
+function codeForName(nm){ if(!nm) return null; const n=_norm(nm); const t=teamList().find(x=>_norm(x.name)===n); return t?t.code:null; }
+function allMatches(){ return FIXTURES.concat(state.koFixtures||[]); }
 function bracketLocked(){ return Date.now() >= new Date(BRACKET_DEADLINE).getTime(); }
 function sameAns(a,b){ return a && b && String(a).trim().toLowerCase()===String(b).trim().toLowerCase(); }
 function bracketPoints(b){
@@ -711,7 +751,8 @@ function renderFinals(){
     const msg=document.getElementById("finalsMsg");
     submit.disabled=true; msg.className="msg"; msg.textContent="Saving…";
     try{
-      const res=await apiPost({action:"predict",name:state.user,matchId:BRACKET_ID,winner:JSON.stringify(obj),h:0,a:0});
+      const res=await apiPost({action:"finalsPick",name:state.user,
+        champion:obj.champion||"",runnerup:obj.runnerup||"",third:obj.third||"",scorer:obj.scorer||"",player:obj.player||""});
       if(res&&res.ok){ ingest(res.data); msg.className="msg ok"; msg.textContent="✓ Saved!"; renderFinals(); }
       else { msg.className="msg err"; msg.textContent="Error: "+(res&&res.error||"unknown"); submit.disabled=false; }
     }catch(e){ msg.className="msg err"; msg.textContent="Connection error. Check the API URL."; submit.disabled=false; }
@@ -765,7 +806,7 @@ function finalsAdminHtml(){
 async function renderBracket(){
   const host=document.getElementById("bracketHost");
   if(!state.bracket) host.innerHTML='<div class="loader">Loading the live bracket from the official feed…</div>';
-  try{ state.bracket=await fetchBracket(); }catch(e){}
+  try{ await syncKnockout(); }catch(e){}
   const rounds=state.bracket||{};
   const any=ROUND_ORDER.some(r=>(rounds[r]||[]).length);
   if(!any){ host.innerHTML='<div class="banner" style="background:#f0edf9">🏆 The knockout stage hasn\'t started yet. As soon as the Round of 32 matchups are set, the qualified teams appear here automatically — pulled live from the official feed and refreshed every few minutes.</div>'; return; }
@@ -874,8 +915,10 @@ async function enterApp(name){
   show("matches");
   try{ const reg=await apiPost({action:"register",name}); if(reg&&reg.ok) ingest(reg.data); }
   catch(e){ try{ ingest(await apiGet()); }catch(e2){} }
+  try{ state.espnResults=await fetchEspnResults(); }catch(e){}
+  try{ await syncKnockout(); }catch(e){}
+  mergeResults();
   renderMatches(); renderAdmin();
-  refreshAll();
   if(!window._wcTimer) window._wcTimer=setInterval(refreshAll, 5*60*1000);
 }
 document.getElementById("enterBtn").onclick=()=>{
